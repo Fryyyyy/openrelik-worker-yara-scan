@@ -12,6 +12,8 @@ class YetiIntelProvider(IntelProvider):
         yeti_client: Yeti API client.
     """
 
+    NAME = "yeti"
+
     def __init__(self):
         endpoint = os.environ.get("YETI_ENDPOINT")
         api_key = os.environ.get("YETI_API_KEY")

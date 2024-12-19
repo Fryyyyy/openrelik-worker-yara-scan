@@ -42,6 +42,13 @@ TASK_METADATA = {
             "required": False,
         },
         {
+            "name": "Yara sources",
+            "label": "Select systems to fetch Yara from",
+            "description": "Available systems: yeti",
+            "type": "text",
+            "required": False,
+        },
+        {
             "name": "Yara rule name filter",
             "label": "Filter rules by name",
             "description": "Filter to apply on rules to obtain from the TIP",
@@ -49,6 +56,10 @@ TASK_METADATA = {
             "required": False,
         },
     ],
+}
+
+AVAILABLE_PROVIDERS = {
+    "yeti": yeti.YetiIntelProvider,
 }
 
 
@@ -109,16 +120,30 @@ def command(
         Base64-encoded dictionary containing task results.
     """
     output_files = []
-    provider = yeti.YetiIntelProvider()
 
-    all_patterns = provider.get_yara_rules(
-        name_filter=task_config.get("Yara rule name filter", "")
-    )
-    logger.info(f"Obtained {len(all_patterns)} bytes of Yara rules")
+    providers = []
+    for provider_key in task_config.get("Yara sources").split(","):
+        provider_class = AVAILABLE_PROVIDERS.get(provider_key, None)
+        providers.append(provider_class())
+
+    all_patterns = ""
+    for provider in providers:
+        all_patterns += provider.get_yara_rules(
+            name_filter=task_config.get("Yara rule name filter", "")
+        )
+        logger.info(
+            f"Obtained {len(all_patterns)} bytes of Yara rules from {provider.NAME}"
+        )
+
     manual_yara = task_config.get("Manual Yara rules", "")
     if manual_yara:
         logger.info("Manual rules provided, added manual Yara rules")
         all_patterns += manual_yara
+
+    if not all_patterns:
+        raise ValueError(
+            "No Yara rules were collected, select a system or provide a manual Yara rule"
+        )
 
     output_file = create_output_file(output_path, display_name="all.yara")
     with open(output_file.path, "w") as fh:
