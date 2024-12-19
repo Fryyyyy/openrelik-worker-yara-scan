@@ -13,76 +13,74 @@
 # limitations under the License.
 
 import os
+from collections import defaultdict
+from dataclasses import dataclass
+import logging
 
+import yara
 from openrelik_worker_common.file_utils import create_output_file
+from openrelik_worker_common.reporting import MarkdownTable, Report, Priority
 from openrelik_worker_common.task_utils import create_task_result, get_input_files
 
 from .app import celery
 from .providers import yeti
 
-from collections import defaultdict
-from openrelik_worker_common.reporting import Report, MarkdownTable
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-from dataclasses import dataclass
-
-import yara
-
-# Task name used to register and route the task to the correct queue.
 TASK_NAME = "openrelik-worker-yara-scan.tasks.yara-scan"
 
-# Task metadata for registration in the core system.
 TASK_METADATA = {
     "display_name": "Yara scan",
     "description": "Scans a folder with Yara rules obtained from Yeti",
-    # Configuration that will be rendered as a web for in the UI, and any data entered
-    # by the user will be available to the task function when executing (task_config).
     "task_config": [
-        # {
-        #     "name": "<REPLACE_WITH_NAME>",
-        #     "label": "<REPLACE_WITH_LABEL>",
-        #     "description": "<REPLACE_WITH_DESCRIPTION>",
-        #     "type": "<REPLACE_WITH_TYPE>",  # Types supported: text, textarea, checkbox
-        #     "required": False,
-        # },
+        {
+            "name": "Manual Yara rules",
+            "label": 'rule test { strings: $ = "test" condition: true }',
+            "description": "Run these extra Yara rules using the YaraScan plugin.",
+            "type": "textarea",
+            "required": False,
+        },
+        {
+            "name": "Yara rule name filter",
+            "label": "Filter rules by name",
+            "description": "Filter to apply on rules to obtain from the TIP",
+            "type": "text",
+            "required": False,
+        },
     ],
-}
-
-ALLOWED_EXTERNALS = {
-    "filename": "",
-    "filepath": "",
-    "extension": "",
-    "filetype": "",
-    "owner": "",
 }
 
 
 @dataclass
 class YaraMatch:
+    """Dataclass to store Yara match information."""
+
     rule: str
     strings: list
-    meta: dict
+    meta: str
     filepath: str
 
 
 def generate_report_from_matches(matches: list[YaraMatch]) -> Report:
+    """Generate a report from Yara matches.
+
+    Args:
+        matches: List of YaraMatch objects.
+
+    Returns:
+        Report object.
+    """
     report = Report("Yara scan report")
     matches_section = report.add_section()
     matches_section.add_paragraph(
         "List of Yara matches found in the scanned files. Check out all.yar for source rules."
     )
-    match_table = MarkdownTable(
-        "filepath",
-        "rule",
-        "meta",
-        "strings",
-    )
+    if matches:
+        report.priority = Priority.CRITICAL
+    match_table = MarkdownTable(["filepath", "rule", "meta", "strings"])
     for match in matches:
-        match_table.add_row(
-            match.filepath,
-            match.rule,
-            match.meta,
-            match.strings,
-        )
+        match_table.add_row([match.filepath, match.rule, match.meta, match.strings])
 
     matches_section.add_table(match_table)
 
@@ -98,7 +96,7 @@ def command(
     workflow_id: str = None,
     task_config: dict = None,
 ) -> str:
-    """Run <REPLACE_WITH_COMMAND> on input files.
+    """Fetch and run Yara rules on the input files.
 
     Args:
         pipe_result: Base64-encoded result from the previous Celery task, if any.
@@ -113,7 +111,15 @@ def command(
     output_files = []
     provider = yeti.YetiIntelProvider()
 
-    all_patterns = provider.get_yara_rules()
+    all_patterns = provider.get_yara_rules(
+        name_filter=task_config.get("Yara rule name filter", "")
+    )
+    logger.info(f"Obtained {len(all_patterns)} bytes of Yara rules")
+    manual_yara = task_config.get("Manual Yara rules", "")
+    if manual_yara:
+        logger.info("Manual rules provided, added manual Yara rules")
+        all_patterns += manual_yara
+
     output_file = create_output_file(output_path, display_name="all.yara")
     with open(output_file.path, "w") as fh:
         fh.write(all_patterns)
@@ -132,11 +138,9 @@ def command(
     all_matches = []
 
     for input_file in get_input_files(pipe_result, input_files):
-        print(input_file)
         internal_path = input_file.get("path")
         filepath = input_file.get("display_name")
-        print(f"Scanning file: ({filepath}) {internal_path}")
-        # externals = ALLOWED_EXTERNALS.copy()
+        logging.info(f"Scanning file: ({filepath}) {internal_path}")
         externals = {
             "filepath": filepath,
             "filename": os.path.basename(filepath),
@@ -152,14 +156,11 @@ def command(
 
         for match in matches:
             rule_count_per_name[match.rule] += 1
-            print(f"Matched rule: {match.rule}")
-            print(f"Matched strings: {match.strings}")
-            print(f"Matched meta: {match.meta}")
             all_matches.append(
                 YaraMatch(
                     rule=match.rule,
-                    strings=match.strings,
-                    meta=match.meta,
+                    strings=str(match.strings),
+                    meta=str(match.meta),
                     filepath=filepath,
                 )
             )
@@ -175,6 +176,8 @@ def command(
         fh.write(report.to_markdown())
 
     progress["matching_rule_names"] = rule_count_per_name
+
+    output_files.append(report_file.to_dict())
 
     return create_task_result(
         output_files=output_files,
