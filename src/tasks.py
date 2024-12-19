@@ -20,6 +20,11 @@ from openrelik_worker_common.task_utils import create_task_result, get_input_fil
 from .app import celery
 from .providers import yeti
 
+from collections import defaultdict
+from openrelik_worker_common.reporting import Report, MarkdownTable
+
+from dataclasses import dataclass
+
 import yara
 
 # Task name used to register and route the task to the correct queue.
@@ -49,6 +54,39 @@ ALLOWED_EXTERNALS = {
     "filetype": "",
     "owner": "",
 }
+
+
+@dataclass
+class YaraMatch:
+    rule: str
+    strings: list
+    meta: dict
+    filepath: str
+
+
+def generate_report_from_matches(matches: list[YaraMatch]) -> Report:
+    report = Report("Yara scan report")
+    matches_section = report.add_section()
+    matches_section.add_paragraph(
+        "List of Yara matches found in the scanned files. Check out all.yar for source rules."
+    )
+    match_table = MarkdownTable(
+        "filepath",
+        "rule",
+        "meta",
+        "strings",
+    )
+    for match in matches:
+        match_table.add_row(
+            match.filepath,
+            match.rule,
+            match.meta,
+            match.strings,
+        )
+
+    matches_section.add_table(match_table)
+
+    return report
 
 
 @celery.task(bind=True, name=TASK_NAME, metadata=TASK_METADATA)
@@ -84,8 +122,14 @@ def command(
 
     files_scanned = 0
     files_matched = 0
-    progress = {"files_scanned": files_scanned, "matches": files_matched}
+    progress = {
+        "files_scanned": files_scanned,
+        "files_matched": files_matched,
+        "unique_rules_matched": 0,
+    }
+    rule_count_per_name = defaultdict(int)
     self.send_event("task-progress", data=progress)
+    all_matches = []
 
     for input_file in get_input_files(pipe_result, input_files):
         print(input_file)
@@ -107,13 +151,30 @@ def command(
             files_matched += 1
 
         for match in matches:
+            rule_count_per_name[match.rule] += 1
             print(f"Matched rule: {match.rule}")
             print(f"Matched strings: {match.strings}")
             print(f"Matched meta: {match.meta}")
+            all_matches.append(
+                YaraMatch(
+                    rule=match.rule,
+                    strings=match.strings,
+                    meta=match.meta,
+                    filepath=filepath,
+                )
+            )
 
         progress["files_scanned"] = files_scanned
         progress["files_matched"] = files_matched
+        progress["unique_rules_matched"] = len(rule_count_per_name)
         self.send_event("task-progress", data=progress)
+
+    report = generate_report_from_matches(all_matches)
+    report_file = create_output_file(output_path, display_name="report.md")
+    with open(report_file.path, "w") as fh:
+        fh.write(report.to_markdown())
+
+    progress["matching_rule_names"] = rule_count_per_name
 
     return create_task_result(
         output_files=output_files,
