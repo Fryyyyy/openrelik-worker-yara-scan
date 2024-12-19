@@ -12,14 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import os
 from collections import defaultdict
 from dataclasses import dataclass
-import logging
 
 import yara
 from openrelik_worker_common.file_utils import create_output_file
-from openrelik_worker_common.reporting import MarkdownTable, Report, Priority
+from openrelik_worker_common.reporting import MarkdownTable, Priority, Report
 from openrelik_worker_common.task_utils import create_task_result, get_input_files
 
 from .app import celery
