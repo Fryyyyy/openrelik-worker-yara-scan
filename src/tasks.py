@@ -12,31 +12,42 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import subprocess
+import os
 
 from openrelik_worker_common.file_utils import create_output_file
 from openrelik_worker_common.task_utils import create_task_result, get_input_files
 
 from .app import celery
+from .providers import yeti
+
+import yara
 
 # Task name used to register and route the task to the correct queue.
-TASK_NAME = "your-worker-package-name.tasks.your_task_name"
+TASK_NAME = "openrelik-worker-yara-scan.tasks.yara-scan"
 
 # Task metadata for registration in the core system.
 TASK_METADATA = {
-    "display_name": "<REPLACE_WITH_NAME_OF_THE_WORKER>",
-    "description": "<REPLACE_WITH_DESCRIPTION_OF_THE_WORKER>",
+    "display_name": "Yara scan",
+    "description": "Scans a folder with Yara rules obtained from Yeti",
     # Configuration that will be rendered as a web for in the UI, and any data entered
     # by the user will be available to the task function when executing (task_config).
     "task_config": [
-        {
-            "name": "<REPLACE_WITH_NAME>",
-            "label": "<REPLACE_WITH_LABEL>",
-            "description": "<REPLACE_WITH_DESCRIPTION>",
-            "type": "<REPLACE_WITH_TYPE>",  # Types supported: text, textarea, checkbox
-            "required": False,
-        },
+        # {
+        #     "name": "<REPLACE_WITH_NAME>",
+        #     "label": "<REPLACE_WITH_LABEL>",
+        #     "description": "<REPLACE_WITH_DESCRIPTION>",
+        #     "type": "<REPLACE_WITH_TYPE>",  # Types supported: text, textarea, checkbox
+        #     "required": False,
+        # },
     ],
+}
+
+ALLOWED_EXTERNALS = {
+    "filename": "",
+    "filepath": "",
+    "extension": "",
+    "filetype": "",
+    "owner": "",
 }
 
 
@@ -61,32 +72,52 @@ def command(
     Returns:
         Base64-encoded dictionary containing task results.
     """
-    input_files = get_input_files(pipe_result, input_files or [])
     output_files = []
-    base_command = ["<REPLACE_WITH_COMMAND>"]
-    base_command_string = " ".join(base_command)
+    provider = yeti.YetiIntelProvider()
 
-    for input_file in input_files:
-        output_file = create_output_file(
-            output_path,
-            display_name=input_file.get("display_name"),
-            extension="<REPLACE_WITH_FILE_EXTENSION>",
-            data_type="<[OPTIONAL]_REPLACE_WITH_DATA_TYPE>",
-        )
-        command = base_command + [input_file.get("path")]
+    all_patterns = provider.get_yara_rules()
+    output_file = create_output_file(output_path, display_name="all.yara")
+    with open(output_file.path, "w") as fh:
+        fh.write(all_patterns)
 
-        # Run the command
-        with open(output_file.path, "w") as fh:
-            subprocess.Popen(command, stdout=fh)
+    output_files.append(output_file.to_dict())
 
-        output_files.append(output_file.to_dict())
+    files_scanned = 0
+    files_matched = 0
+    progress = {"files_scanned": files_scanned, "matches": files_matched}
+    self.send_event("task-progress", data=progress)
 
-    if not output_files:
-        raise RuntimeError("<REPLACE_WITH_ERROR_STRING>")
+    for input_file in get_input_files(pipe_result, input_files):
+        print(input_file)
+        internal_path = input_file.get("path")
+        filepath = input_file.get("display_name")
+        print(f"Scanning file: ({filepath}) {internal_path}")
+        # externals = ALLOWED_EXTERNALS.copy()
+        externals = {
+            "filepath": filepath,
+            "filename": os.path.basename(filepath),
+            "extension": input_file.get("extension"),
+            "filetype": input_file.get("data_type"),
+            "owner": "",
+        }
+        compiled_rules = yara.compile(output_file.path, externals=externals)
+        matches = compiled_rules.match(internal_path)
+        files_scanned += 1
+        if matches:
+            files_matched += 1
+
+        for match in matches:
+            print(f"Matched rule: {match.rule}")
+            print(f"Matched strings: {match.strings}")
+            print(f"Matched meta: {match.meta}")
+
+        progress["files_scanned"] = files_scanned
+        progress["files_matched"] = files_matched
+        self.send_event("task-progress", data=progress)
 
     return create_task_result(
         output_files=output_files,
         workflow_id=workflow_id,
-        command=base_command_string,
-        meta={},
+        command="yeti api query",
+        meta=progress,
     )
