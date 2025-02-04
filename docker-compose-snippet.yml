@@ -1,6 +1,8 @@
 services:
   openrelik-worker-yara-scan:
       container_name: openrelik-worker-yara-scan
+      build:
+        dockerfile: Dockerfile
       image: ghcr.io/tomchop/openrelik-worker-yara-scan
       restart: always
       environment:
