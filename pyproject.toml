@@ -1,8 +1,8 @@
 [tool.poetry]
-name = "openrelik-worker-template"
-version = "2024.11.27"
-description = "Description of the worker"
-authors = ["YOUR NAME <email@example.com>"]
+name = "openrelik-worker-yara-scan"
+version = "2025.02.04"
+description = "Scan a local directory using Yara"
+authors = ["Thomas Chopitea <tomchop@gmial.com>"]
 readme = "README.md"
 package-mode = false
 
