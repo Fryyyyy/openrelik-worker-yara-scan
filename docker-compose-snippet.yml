@@ -1,0 +1,12 @@
+services:
+  openrelik-worker-yara-scan:
+      container_name: openrelik-worker-yara-scan
+      image: ghcr.io/tomchop/openrelik-worker-yara-scan
+      restart: always
+      environment:
+        - REDIS_URL=redis://openrelik-redis:6379
+        - YETI_ENDPOINT=http://dev-api-1:8000/
+        - YETI_API_KEY=fd6d8626ae31e6471d2c020b96231d1dbbf3816704255bc1d364259aa2275bed
+      volumes:
+        - ./data:/usr/share/openrelik/data
+      command: "celery --app=src.app worker --task-events --concurrency=4 --loglevel=INFO -Q openrelik-worker-yara-scan"
