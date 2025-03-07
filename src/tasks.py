@@ -12,18 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import glob
+import json
 import logging
 import os
-from collections import defaultdict
+import subprocess
 from dataclasses import dataclass
 
-import yara
 from openrelik_worker_common.file_utils import create_output_file
 from openrelik_worker_common.reporting import MarkdownTable, Priority, Report
 from openrelik_worker_common.task_utils import create_task_result, get_input_files
 
 from .app import celery
-from .providers import yeti
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -32,7 +32,7 @@ TASK_NAME = "openrelik-worker-yara-scan.tasks.yara-scan"
 
 TASK_METADATA = {
     "display_name": "Yara scan",
-    "description": "Scans a folder with Yara rules obtained from Yeti",
+    "description": "Scans a folder or files with Yara rules",
     "task_config": [
         {
             "name": "Manual Yara rules",
@@ -42,24 +42,14 @@ TASK_METADATA = {
             "required": False,
         },
         {
-            "name": "Yara sources",
-            "label": "Select systems to fetch Yara from",
-            "description": "Available systems: yeti",
-            "type": "text",
+            "name": "Global Yara rules",
+            "label": "/usr/share/openrelik/data/yara/",
+            "Description": "Path to Yara rules as fetched by Data Sources (newline separated)",
+            "type": "textarea",
             "required": False,
         },
-        {
-            "name": "Yara rule name filter",
-            "label": "Filter rules by name",
-            "description": "Filter to apply on rules to obtain from the TIP",
-            "type": "text",
-            "required": False,
-        },
+        # Option to mount input file/s ?
     ],
-}
-
-AVAILABLE_PROVIDERS = {
-    "yeti": yeti.YetiIntelProvider,
 }
 
 
@@ -67,10 +57,12 @@ AVAILABLE_PROVIDERS = {
 class YaraMatch:
     """Dataclass to store Yara match information."""
 
-    rule: str
-    strings: list
-    meta: str
     filepath: str
+    hash: str
+    rule: str
+    desc: str
+    ref: str
+    score: int
 
 
 def generate_report_from_matches(matches: list[YaraMatch]) -> Report:
@@ -85,13 +77,13 @@ def generate_report_from_matches(matches: list[YaraMatch]) -> Report:
     report = Report("Yara scan report")
     matches_section = report.add_section()
     matches_section.add_paragraph(
-        "List of Yara matches found in the scanned files. Check out all.yar for source rules."
+        "List of Yara matches found in the scanned files."
     )
     if matches:
         report.priority = Priority.CRITICAL
-    match_table = MarkdownTable(["filepath", "rule", "meta", "strings"])
+    match_table = MarkdownTable(["filepath", "hash", "rule", "desc", "ref", "score"])
     for match in matches:
-        match_table.add_row([match.filepath, match.rule, match.meta, match.strings])
+        match_table.add_row([match.filepath, match.hash, match.rule, match.desc, match.ref, str(match.score)])
 
     matches_section.add_table(match_table)
 
@@ -120,93 +112,81 @@ def command(
         Base64-encoded dictionary containing task results.
     """
     output_files = []
-
-    providers = []
-    for provider_key in task_config.get("Yara sources").split(","):
-        provider_class = AVAILABLE_PROVIDERS.get(provider_key, None)
-        providers.append(provider_class())
-
+    
     all_patterns = ""
-    for provider in providers:
-        all_patterns += provider.get_yara_rules(
-            name_filter=task_config.get("Yara rule name filter", "")
-        )
-        logger.info(
-            f"Obtained {len(all_patterns)} bytes of Yara rules from {provider.NAME}"
-        )
-
+    global_yara = task_config.get("Global Yara rules", "")
     manual_yara = task_config.get("Manual Yara rules", "")
+
+    if not global_yara and not manual_yara:
+        raise RuntimeError("At least one of Global and/or Manual Yara rules must be provided")
+ 
+    for rule_path in global_yara.split('\n'):
+        if os.path.isfile(rule_path):
+            with open(rule_file) as rf:
+                logger.info(f"Reading rule from {rule_file}")
+                all_patterns += rf.read()
+        if os.path.isdir(rule_path):
+            for rule_file in glob.glob(os.path.join(rule_path, '**/*.yar*'), recursive=True):
+                with open(rule_file) as rf:
+                    logger.info(f"Reading rule from {rule_file}")
+                    all_patterns += rf.read()
+
     if manual_yara:
         logger.info("Manual rules provided, added manual Yara rules")
         all_patterns += manual_yara
 
     if not all_patterns:
         raise ValueError(
-            "No Yara rules were collected, select a system or provide a manual Yara rule"
+            "No Yara rules were collected, provide Global and/or manual Yara rules"
         )
 
-    output_file = create_output_file(output_path, display_name="all.yara")
-    with open(output_file.path, "w") as fh:
+    all_yara = create_output_file(output_path, display_name="all.yara")
+    with open(all_yara.path, "w") as fh:
         fh.write(all_patterns)
 
-    output_files.append(output_file.to_dict())
-
-    files_scanned = 0
-    files_matched = 0
-    progress = {
-        "files_scanned": files_scanned,
-        "files_matched": files_matched,
-        "unique_rules_matched": 0,
-    }
-    rule_count_per_name = defaultdict(int)
-    self.send_event("task-progress", data=progress)
     all_matches = []
+    fraken_output = create_output_file(output_path, display_name="fraken_out.jsonl")
+    output_files.append(fraken_output.to_dict())
 
     for input_file in get_input_files(pipe_result, input_files):
         internal_path = input_file.get("path")
         filepath = input_file.get("display_name")
-        logging.info(f"Scanning file: ({filepath}) {internal_path}")
-        externals = {
-            "filepath": filepath,
-            "filename": os.path.basename(filepath),
-            "extension": input_file.get("extension"),
-            "filetype": input_file.get("data_type"),
-            "owner": "",
-        }
-        compiled_rules = yara.compile(output_file.path, externals=externals)
-        matches = compiled_rules.match(internal_path)
-        files_scanned += 1
-        if matches:
-            files_matched += 1
+        logging.info(f"Scanning file: ({filepath}) {internal_path}") 
 
-        for match in matches:
-            rule_count_per_name[match.rule] += 1
-            all_matches.append(
-                YaraMatch(
-                    rule=match.rule,
-                    strings=str(match.strings),
-                    meta=str(match.meta),
-                    filepath=filepath,
+        cmd = [
+            'fraken', '--folder', f'{internal_path}', f'{all_yara.path}'
+        ]
+        with open(fraken_output.path, 'w+') as log:
+            process = subprocess.Popen(cmd, stdout=log)
+            process.wait()
+
+    with open(fraken_output.path, 'r') as json_file:
+        matches_list_list = list(json_file)
+        
+        for matches_list in matches_list_list:
+            matches = json.loads(matches_list)
+            for match in matches:
+                all_matches.append(
+                    YaraMatch(
+                        filepath=match['ImagePath'],
+                        hash=match['SHA256'],
+                        rule=match['Signature'],
+                        desc=match['Description'],
+                        ref=match['Reference'],
+                        score=match['Score'],
+                    )
                 )
-            )
-
-        progress["files_scanned"] = files_scanned
-        progress["files_matched"] = files_matched
-        progress["unique_rules_matched"] = len(rule_count_per_name)
-        self.send_event("task-progress", data=progress)
 
     report = generate_report_from_matches(all_matches)
     report_file = create_output_file(output_path, display_name="report.md")
     with open(report_file.path, "w") as fh:
         fh.write(report.to_markdown())
 
-    progress["matching_rule_names"] = rule_count_per_name
-
     output_files.append(report_file.to_dict())
 
     return create_task_result(
         output_files=output_files,
         workflow_id=workflow_id,
-        command="yeti api query",
-        meta=progress,
+        command="fraken",
+        task_report=report.to_dict(),
     )

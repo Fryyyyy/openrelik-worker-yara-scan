@@ -1,8 +1,8 @@
 [tool.poetry]
 name = "openrelik-worker-yara-scan"
-version = "2025.02.04"
-description = "Scan a local directory using Yara"
-authors = ["Thomas Chopitea <tomchop@gmial.com>"]
+version = "2025.03.05"
+description = "Scan a local directory using Fraken-X"
+authors = ["Thomas Chopitea <tomchop@gmail.com>", "Fry <fryx0r@gmail.com>"]
 readme = "README.md"
 package-mode = false
 
@@ -10,8 +10,6 @@ package-mode = false
 python = "^3.10"
 celery = {extras = ["redis"], version = "^5.4.0"}
 openrelik-worker-common = "^2024.11.27"
-yeti = {git = "https://github.com/yeti-platform/yeti-python.git"}
-yara-python = "^4.5.1"
 
 [build-system]
 requires = ["poetry-core"]
