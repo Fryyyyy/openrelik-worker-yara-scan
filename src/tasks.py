@@ -154,8 +154,7 @@ def command(
     output_files.append(fraken_output.to_dict())
 
     input_files = get_input_files(pipe_result, input_files)
-    # print(input_files)
-    # [{'id': 6, 'uuid': '41acaa2f58454da48e6e13806850787e', 'display_name': 'eicar.txt', 'extension': 'txt', 'data_type': 'file:generic', 'mime_type': 'text/plain', 'path': '/usr/share/openrelik/data/artifacts/06136884f5e146f8993859c5edc6e40e/41acaa2f58454da48e6e13806850787e.txt'}]
+
     input_files_map = {}
     for input_file in input_files:
         input_files_map[input_file.get("path", input_file.get("uuid", "UNKNOWN FILE"))] = input_file.get("display_name", "UNKNOWN FILE NAME")
