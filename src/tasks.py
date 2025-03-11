@@ -48,10 +48,15 @@ TASK_METADATA = {
             "type": "textarea",
             "required": False,
         },
-        # Option to mount input file/s ?
+        # TODO(fryy): Option to mount input file/s ?
     ],
 }
 
+def safe_list_get(input, index, default):
+  try:
+    return input[index]
+  except IndexError:
+    return default
 
 @dataclass
 class YaraMatch:
@@ -148,10 +153,19 @@ def command(
     fraken_output = create_output_file(output_path, display_name="fraken_out.jsonl")
     output_files.append(fraken_output.to_dict())
 
-    for input_file in get_input_files(pipe_result, input_files):
+    input_files = get_input_files(pipe_result, input_files)
+    # print(input_files)
+    # [{'id': 6, 'uuid': '41acaa2f58454da48e6e13806850787e', 'display_name': 'eicar.txt', 'extension': 'txt', 'data_type': 'file:generic', 'mime_type': 'text/plain', 'path': '/usr/share/openrelik/data/artifacts/06136884f5e146f8993859c5edc6e40e/41acaa2f58454da48e6e13806850787e.txt'}]
+    input_files_map = {}
+    for input_file in input_files:
+        input_files_map[input_file.get("path", input_file.get("uuid", "UNKNOWN FILE"))] = input_file.get("display_name", "UNKNOWN FILE NAME")
+
+    for input_file in input_files:
         internal_path = input_file.get("path")
         filepath = input_file.get("display_name")
         logging.info(f"Scanning file: ({filepath}) {internal_path}") 
+
+        # TODO(fryy): 5 seconds slow
 
         cmd = [
             'fraken', '--folder', f'{internal_path}', f'{all_yara.path}'
@@ -165,10 +179,11 @@ def command(
         
         for matches_list in matches_list_list:
             matches = json.loads(matches_list)
+            
             for match in matches:
                 all_matches.append(
                     YaraMatch(
-                        filepath=match['ImagePath'],
+                        filepath=input_files_map.get(match['ImagePath'], match['ImagePath']),
                         hash=match['SHA256'],
                         rule=match['Signature'],
                         desc=match['Description'],
