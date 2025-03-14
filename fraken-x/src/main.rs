@@ -52,7 +52,7 @@ struct Cli {
 struct TestOrScan {
     /// Specify a particular folder to be scanned
     #[arg(short, long, group = "testorscan")]
-    folder: Option<PathBuf>,
+    folder: Option<Vec<PathBuf>>,
 
     /// Test the rules for syntax validity and then exit
     #[arg(long, group = "testorscan")]
@@ -188,7 +188,7 @@ impl OutputHandler for JsonOutputHandler {
             std::mem::take(&mut *lock)
         };
         if matches.len() == 0 {
-            println!("No hits");
+            println!("[]"); // Empty JSON.
             return;
         }
         let rendered_json = serde_json::to_string(&matches).expect("Failed to render JSON");
@@ -201,19 +201,6 @@ fn main() {
     let mut compiler = yara_x::Compiler::new();
     let mut definitions: Vec<(Vec<u8>, String)> = vec![];
     let mut max_signature_len = 0;
-    let users = HashMap::new();
-
-    if let Some(etc_folder_path) = cli.testorscan.folder.as_ref() {
-        let joined_path = etc_folder_path.join("/etc/passwd");
-        let full_folder_path = joined_path.to_str().unwrap_or("");
-        eprintln!("[+] Parsing /etc/passwd under {}", full_folder_path);
-        let users = userid::get_usernames_from_passwd(full_folder_path).unwrap_or(HashMap::new());
-        if users.len() == 0 {
-            eprintln!("[-] No users found in /etc/passwd");
-        } else {
-            eprintln!("[+] {} users found", users.len());
-        }
-    }
 
     if cli.magic.is_some() {
         eprintln!("[+] Testing existence of magic file");
@@ -229,7 +216,6 @@ fn main() {
             eprintln!("[+] {} magics parsed", definitions.len());
         }
     }
-    let state = ScanState::new(definitions, users);
 
     // External vars.
     let vars = vec!["filepath", "filename", "filetype", "extension", "owner"];
@@ -277,91 +263,105 @@ fn main() {
     }
 
     eprintln!("[+] Scanning!");
-    let path = cli.testorscan.folder.expect("Needs a path");
-    let w = ParWalker::path(path.as_path());
-    let output_handler = JsonOutputHandler {
-        output_buffer: Default::default(),
-    };
-    w.walk(
-        state,
-        // Init.
-        |_, _output| {
-            let scanner = Scanner::new(&rules);
-            scanner
-        },
-        // File handler
-        |state, output, file_path, scanner| {
-            eprint!("Scanning: {}", file_path.display());
-            let metadata = fs::metadata(file_path.clone())?;
-            if metadata.len() > cli.maxsize {
-                return Ok(());
-            }
-            if let Some(username) = state.users.get(&metadata.uid()) {
-                scanner.set_global("owner", username.clone())?;
-            }
+    let path_vec = cli.testorscan.folder.expect("Needs a path");
 
-            scanner.set_global("filepath", file_path.to_str().unwrap())?;
-            scanner.set_global("filename", file_path.file_name().unwrap().to_str().unwrap())?;
-            scanner.set_global(
-                "extension",
-                file_path
-                    .extension()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or("".to_string()),
-            )?;
+    for path in path_vec {
+        let joined_path = path.join("/etc/passwd");
+        let full_folder_path = joined_path.to_str().unwrap_or("");
+        eprintln!("[+] Parsing /etc/passwd under {}", full_folder_path);
+        let users = userid::get_usernames_from_passwd(full_folder_path).unwrap_or(HashMap::new());
+        if users.len() == 0 {
+            eprintln!("[-] No users found in /etc/passwd");
+        } else {
+            eprintln!("[+] {} users found", users.len());
+        }
 
-            // Magics
-            let target_bytes =
-            // Anyhow
-                magic::read_first_bytes(file_path.to_str().unwrap_or(""), max_signature_len).unwrap_or(vec![]);
-            if target_bytes.len() > 0 {
-                for (hex_bytes, description) in &state.definitions {
-                    if target_bytes.starts_with(&hex_bytes) {
-                        scanner.set_global("filetype", description.clone())?;
-                        break;
+        let state = ScanState::new(definitions.clone(), users);
+
+        let w = ParWalker::path(path.as_path());
+        let output_handler = JsonOutputHandler {
+            output_buffer: Default::default(),
+        };
+        w.walk(
+            state,
+            // Init.
+            |_, _output| {
+                let scanner = Scanner::new(&rules);
+                scanner
+            },
+            // File handler
+            |state, output, file_path, scanner| {
+                let metadata = fs::metadata(file_path.clone())?;
+                if metadata.len() > cli.maxsize {
+                    return Ok(());
+                }
+                if let Some(username) = state.users.get(&metadata.uid()) {
+                    scanner.set_global("owner", username.clone())?;
+                }
+
+                scanner.set_global("filepath", file_path.to_str().unwrap())?;
+                scanner.set_global("filename", file_path.file_name().unwrap().to_str().unwrap())?;
+                scanner.set_global(
+                    "extension",
+                    file_path
+                        .extension()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or("".to_string()),
+                )?;
+
+                // Magics
+                let target_bytes =
+                // Anyhow
+                    magic::read_first_bytes(file_path.to_str().unwrap_or(""), max_signature_len).unwrap_or(vec![]);
+                if target_bytes.len() > 0 {
+                    for (hex_bytes, description) in &state.definitions {
+                        if target_bytes.starts_with(&hex_bytes) {
+                            scanner.set_global("filetype", description.clone())?;
+                            break;
+                        }
                     }
                 }
-            }
 
-            let scan_results = scanner.scan_file(file_path.as_path());
-            let scan_results = scan_results?;
-            let matched_count = scan_results.matching_rules().len();
-            let matched = scan_results.matching_rules();
+                let scan_results = scanner.scan_file(file_path.as_path());
+                let scan_results = scan_results?;
+                let matched_count = scan_results.matching_rules().len();
+                let matched = scan_results.matching_rules();
 
-            output_handler.on_file_scanned(file_path.as_path(), matched, output, cli.minscore);
+                output_handler.on_file_scanned(file_path.as_path(), matched, output, cli.minscore);
 
-            state.num_scanned_files.fetch_add(1, Ordering::Relaxed);
-            if matched_count > 0 {
-                state.num_matching_files.fetch_add(1, Ordering::Relaxed);
-            }
+                state.num_scanned_files.fetch_add(1, Ordering::Relaxed);
+                if matched_count > 0 {
+                    state.num_matching_files.fetch_add(1, Ordering::Relaxed);
+                }
 
-            // Reset globals
-            scanner.set_global("owner", "")?;
-            scanner.set_global("filepath", "")?;
-            scanner.set_global("filename", "")?;
-            scanner.set_global("extension", "")?;
-            scanner.set_global("filetype", "")?;
+                // Reset globals
+                scanner.set_global("owner", "")?;
+                scanner.set_global("filepath", "")?;
+                scanner.set_global("filename", "")?;
+                scanner.set_global("extension", "")?;
+                scanner.set_global("filetype", "")?;
 
-            Ok(())
-        },
-        // Finalisation
-        |_, _| {},
-        // Walk done.
-        |output| output_handler.on_done(output),
-        // Error handler
-        |err, _| {
-            let error = err.to_string();
-            let root_cause = err.root_cause().to_string();
-            let msg = if error != root_cause {
-                format!("{} {}: {}", "error: ".paint(Red).bold(), error, root_cause,)
-            } else {
-                format!("{}: {}", "error: ".paint(Red).bold(), error)
-            };
+                Ok(())
+            },
+            // Finalisation
+            |_, _| {},
+            // Walk done.
+            |output| output_handler.on_done(output),
+            // Error handler
+            |err, _| {
+                let error = err.to_string();
+                let root_cause = err.root_cause().to_string();
+                let msg = if error != root_cause {
+                    format!("{} {}: {}", "error: ".paint(Red).bold(), error, root_cause,)
+                } else {
+                    format!("{}: {}", "error: ".paint(Red).bold(), error)
+                };
 
-            eprintln!("{}", msg);
+                eprintln!("{}", msg);
 
-            Ok(())
-        },
-    )
-    .unwrap();
+                Ok(())
+            },
+        )
+        .unwrap();
+    }
 }

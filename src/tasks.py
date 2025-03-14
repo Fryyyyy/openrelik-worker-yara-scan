@@ -52,11 +52,12 @@ TASK_METADATA = {
     ],
 }
 
-def safe_list_get(input, index, default):
-  try:
-    return input[index]
-  except IndexError:
-    return default
+def safe_list_get(l, index, default):
+    """Small helper function to safely get an item from a list."""
+    try:
+        return l[index]
+    except IndexError:
+        return default
 
 @dataclass
 class YaraMatch:
@@ -117,23 +118,23 @@ def command(
         Base64-encoded dictionary containing task results.
     """
     output_files = []
-    
+
     all_patterns = ""
     global_yara = task_config.get("Global Yara rules", "")
     manual_yara = task_config.get("Manual Yara rules", "")
 
     if not global_yara and not manual_yara:
         raise RuntimeError("At least one of Global and/or Manual Yara rules must be provided")
- 
+
     for rule_path in global_yara.split('\n'):
         if os.path.isfile(rule_path):
-            with open(rule_file) as rf:
-                logger.info(f"Reading rule from {rule_file}")
+            with open(rule_path, encoding="utf-8") as rf:
+                logger.info("Reading rule from %s", rule_path)
                 all_patterns += rf.read()
         if os.path.isdir(rule_path):
             for rule_file in glob.glob(os.path.join(rule_path, '**/*.yar*'), recursive=True):
-                with open(rule_file) as rf:
-                    logger.info(f"Reading rule from {rule_file}")
+                with open(rule_file, encoding="utf-8") as rf:
+                    logger.info("Reading rule from %s", rule_file)
                     all_patterns += rf.read()
 
     if manual_yara:
@@ -146,7 +147,7 @@ def command(
         )
 
     all_yara = create_output_file(output_path, display_name="all.yara")
-    with open(all_yara.path, "w") as fh:
+    with open(all_yara.path, "w", encoding="utf-8") as fh:
         fh.write(all_patterns)
 
     all_matches = []
@@ -157,28 +158,29 @@ def command(
 
     input_files_map = {}
     for input_file in input_files:
-        input_files_map[input_file.get("path", input_file.get("uuid", "UNKNOWN FILE"))] = input_file.get("display_name", "UNKNOWN FILE NAME")
+        input_files_map[input_file.get(
+            "path", input_file.get("uuid", "UNKNOWN FILE"))] = input_file.get(
+                "display_name", "UNKNOWN FILE NAME")
 
+    folders_and_files = []
     for input_file in input_files:
-        internal_path = input_file.get("path")
-        filepath = input_file.get("display_name")
-        logging.info(f"Scanning file: ({filepath}) {internal_path}") 
+        if 'internal_path' not in input_file:
+            logger.warning("Skipping file %s as it does not have an internal path", input_file)
+            continue
+        folders_and_files.append('--folder')
+        folders_and_files.append(input_file.get('internal_path'))
 
-        # TODO(fryy): 5 seconds slow
+    cmd = ['fraken'] + folders_and_files + [f'{all_yara.path}']
+    with open(fraken_output.path, 'w+', encoding="utf-8") as log:
+        process = subprocess.Popen(cmd, stdout=log)
+        process.wait()
 
-        cmd = [
-            'fraken', '--folder', f'{internal_path}', f'{all_yara.path}'
-        ]
-        with open(fraken_output.path, 'w+') as log:
-            process = subprocess.Popen(cmd, stdout=log)
-            process.wait()
-
-    with open(fraken_output.path, 'r') as json_file:
+    with open(fraken_output.path, 'r', encoding="utf-8") as json_file:
         matches_list_list = list(json_file)
-        
+
         for matches_list in matches_list_list:
             matches = json.loads(matches_list)
-            
+
             for match in matches:
                 all_matches.append(
                     YaraMatch(
@@ -193,7 +195,7 @@ def command(
 
     report = generate_report_from_matches(all_matches)
     report_file = create_output_file(output_path, display_name="report.md")
-    with open(report_file.path, "w") as fh:
+    with open(report_file.path, "w", encoding="utf-8") as fh:
         fh.write(report.to_markdown())
 
     output_files.append(report_file.to_dict())
